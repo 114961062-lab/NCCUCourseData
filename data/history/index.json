@@ -1,8 +1,8 @@
 {
   "status": "ok",
   "scope": "1001-1142",
-  "updatedAtUtc": "2026-08-26T17:52:51+00:00",
-  "semesterCount": 13,
+  "updatedAtUtc": "2026-08-26T18:00:04+00:00",
+  "semesterCount": 15,
   "semesters": [
     {
       "semester": "1142",
@@ -14,6 +14,28 @@
       "status": "ok",
       "csvPath": "data/history/1142/nccu_courses_1142.csv",
       "metadataPath": "data/history/1142/metadata.json"
+    },
+    {
+      "semester": "1062",
+      "academicYear": "106",
+      "term": "2",
+      "courseCount": 2784,
+      "unitCount": 278,
+      "archivedAtUtc": "2026-08-26T17:59:27+00:00",
+      "status": "ok",
+      "csvPath": "data/history/1062/nccu_courses_1062.csv",
+      "metadataPath": "data/history/1062/metadata.json"
+    },
+    {
+      "semester": "1061",
+      "academicYear": "106",
+      "term": "1",
+      "courseCount": 2833,
+      "unitCount": 278,
+      "archivedAtUtc": "2026-08-26T17:58:33+00:00",
+      "status": "ok",
+      "csvPath": "data/history/1061/nccu_courses_1061.csv",
+      "metadataPath": "data/history/1061/metadata.json"
     },
     {
       "semester": "1052",
