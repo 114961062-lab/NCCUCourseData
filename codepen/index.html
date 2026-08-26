@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>政大全校115-1學期模擬排課系統</title>
+    <meta
+        name="description"
+        content="政大全校115-1學期模擬排課系統，可依學院與開課單位查詢課程、跨系排課、檢查衝堂並匯出個人課表。"
+    >
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" class="app-shell">
+    <header class="app-header no-print">
+        <div class="header-main">
+            <div>
+                <div class="eyebrow">NCCU · 115-1 SEMESTER</div>
+                <h1>🏛️ 政大全校115-1學期模擬排課系統</h1>
+                <p class="subtitle">
+                    全校學生適用｜學期期間：2026/9/7–12/26｜跨院系課程整合版
+                </p>
+            </div>
+
+            <div class="header-kpis" aria-label="選課統計">
+                <div class="kpi-card">
+                    <span>已選課程</span>
+                    <strong>{{ activeCourses.length }}</strong>
+                    <small>門</small>
+                </div>
+                <div class="kpi-card primary">
+                    <span>總學分</span>
+                    <strong>{{ totalSelectedCredits }}</strong>
+                    <small>學分</small>
+                </div>
+            </div>
+        </div>
+
+        <nav class="system-switcher" aria-label="相關系統">
+            <span class="switcher-label">系統切換</span>
+            <span class="system-link current" aria-current="page">📘 115-1模擬排課</span>
+            <a class="system-link" href="https://codepen.io/tuakjxnm-the-builder/full/WbxeoYN" target="_blank" rel="noopener noreferrer">
+                📅 115-1學期行事曆
+            </a>
+            <a class="system-link" href="https://qrysub.nccu.edu.tw/" target="_blank" rel="noopener noreferrer">
+                🔎 課程查詢
+            </a>
+            <a class="system-link" href="https://selectcourse.nccu.edu.tw/regcourse/" target="_blank" rel="noopener noreferrer">
+                📝 正式選課
+            </a>
+        </nav>
+
+        <div class="status-actions">
+            <div class="status-badges">
+                <span class="status-badge success">✓ 跨頁防衝堂</span>
+                <span class="status-badge info">GitHub全校課程資料</span>
+                <span class="status-badge info">已加入 {{ customCourses.length }} 門</span>
+                <span class="status-badge warning">選課資格請依各系所規定</span>
+            </div>
+
+            <div class="header-actions">
+                <button type="button" class="action-button" @click="exportPlan">⬇ 匯出選課資料</button>
+                <input
+                    ref="planFileInput"
+                    type="file"
+                    accept=".json,application/json"
+                    hidden
+                    @change="handlePlanFile"
+                >
+                <button type="button" class="action-button" @click="triggerImportPlan">⬆ 匯入選課資料</button>
+                <button type="button" class="action-button" :disabled="!hasActiveCourses" @click="printSchedule">
+                    🖨️ 列印／PDF
+                </button>
+                <button type="button" class="action-button danger" :disabled="!customCourses.length && !qrysubSearchResults.length" @click="clearAll">
+                    🗑️ 清除
+                </button>
+            </div>
+        </div>
+
+        <div class="system-notice">
+            可依學院及開課單位查詢政大115-1全校課程，加入個人模擬課表並跨院系檢查固定時段衝堂。系統僅供排課規劃，不代表正式選課、修課資格或畢業學分採認結果；實際資訊仍以政大選課系統及各開課單位公告為準。
+        </div>
+    </header>
+
+    <main class="workspace">
+        <aside v-if="activePage !== 'EXTERNAL'" class="course-sidebar no-print">
+            <section class="filter-panel">
+                <div class="section-heading">
+                    <div>
+                        <span class="section-kicker">{{ currentPage.kicker }}</span>
+                        <h2>{{ currentPage.title }}</h2>
+                    </div>
+                    <span class="result-count">{{ visibleCourses.length }} / {{ currentProgramCourses.length }}</span>
+                </div>
+
+                <p class="page-description">{{ currentPage.description }}</p>
+
+                <section
+                    v-if="activePage === 'ELLM'"
+                    class="subject-filter-panel"
+                    aria-label="在職專班科目分類"
+                >
+                    <div class="subject-filter-heading">
+                        <span>在職專班科目分類</span>
+                        <small>可分開查看及選擇基礎或進階課程</small>
+                    </div>
+
+                    <div class="subject-filter-tabs" role="tablist">
+                        <button
+                            v-for="option in subjectTypeOptions"
+                            :key="option.value"
+                            type="button"
+                            role="tab"
+                            :aria-selected="subjectTypeFilter === option.value"
+                            :class="[
+                                'subject-filter-tab',
+                                option.className,
+                                { active: subjectTypeFilter === option.value }
+                            ]"
+                            @click="selectSubjectType(option.value)"
+                        >
+                            <span>{{ option.label }}</span>
+                            <small>{{ getSubjectTypeCount(option.value) }}</small>
+                        </button>
+                    </div>
+                </section>
+
+                <label class="field-label">
+                    <span>搜尋課名、教師、科目代碼或備註</span>
+                    <input
+                        v-model.trim="searchQuery"
+                        class="filter-control"
+                        type="search"
+                        placeholder="輸入關鍵字"
+                    >
+                </label>
+
+                <div class="filter-grid">
+                    <label class="field-label">
+                        <span>學分</span>
+                        <select v-model="creditFilter" class="filter-control">
+                            <option value="ALL">全部學分</option>
+                            <option value="1">1 學分</option>
+                            <option value="2">2 學分</option>
+                            <option value="3">3 學分</option>
+                        </select>
+                    </label>
+
+                    <label class="field-label">
+                        <span>狀態</span>
+                        <select v-model="statusFilter" class="filter-control">
+                            <option value="ALL">全部狀態</option>
+                            <option value="SELECTED">已選</option>
+                            <option value="AVAILABLE">可選</option>
+                            <option value="CONFLICT">衝堂</option>
+                        </select>
+                    </label>
+                </div>
+
+                <button
+                    type="button"
+                    class="reset-filter-button"
+                    :disabled="!hasFilters"
+                    @click="resetFilters"
+                >
+                    重設篩選
+                </button>
+            </section>
+
+            <nav class="course-day-tabs" aria-label="星期分頁" role="tablist">
+                <button
+                    v-for="tab in dayTabs"
+                    :key="tab.value"
+                    type="button"
+                    role="tab"
+                    :aria-selected="dayTab === tab.value"
+                    :class="['course-day-tab', { active: dayTab === tab.value }]"
+                    @click="selectDayTab(tab.value)"
+                >
+                    <span>{{ tab.label }}</span>
+                    <small>{{ getDayTabCount(tab.value) }}</small>
+                </button>
+            </nav>
+
+            <section class="course-list" aria-live="polite">
+                <div v-if="visibleCourses.length === 0" class="empty-state">
+                    <strong>找不到符合條件的課程</strong>
+                    <span>請切換星期分頁、調整搜尋條件或重設篩選。</span>
+                </div>
+
+                <article
+                    v-for="course in visibleCourses"
+                    :key="course.key"
+                    :class="[
+                        'course-card',
+                        {
+                            selected: course.active,
+                            conflicting: !course.active && conflictingCourseKeys.has(course.key)
+                        }
+                    ]"
+                >
+                    <div class="course-card-header">
+                        <button
+                            type="button"
+                            class="course-expand-button"
+                            @click="toggleExpanded(course.key)"
+                            :aria-expanded="expandedCourseKey === course.key"
+                        >
+                            <span class="course-dot" :style="{ backgroundColor: course.color }"></span>
+                            <span class="course-heading">
+                                <strong>{{ course.name }}</strong>
+                                <span>{{ course.teacher || '教師待定' }}</span>
+                            </span>
+                            <span class="chevron">{{ expandedCourseKey === course.key ? '−' : '+' }}</span>
+                        </button>
+
+                        <button
+                            type="button"
+                            :class="[
+                                'quick-select-button',
+                                course.active
+                                    ? 'selected'
+                                    : (conflictingCourseKeys.has(course.key) ? 'disabled' : '')
+                            ]"
+                            :disabled="!course.active && conflictingCourseKeys.has(course.key)"
+                            @click="toggleCourse(course)"
+                        >
+                            {{ course.active ? '✓ 已選' : (conflictingCourseKeys.has(course.key) ? '— 衝堂' : '＋ 選課') }}
+                        </button>
+                    </div>
+
+                    <div class="course-card-summary">
+                        <span :class="['source-badge', 'source-' + course.source.toLowerCase()]">
+                            {{ sourceLabel(course) }}
+                        </span>
+                        <span
+                            v-if="course.source === 'ELLM'"
+                            :class="[
+                                'subject-type-badge',
+                                course.subjectType === '基礎科目'
+                                    ? 'subject-type-basic'
+                                    : 'subject-type-advanced'
+                            ]"
+                        >
+                            {{ course.subjectType }}
+                        </span>
+                        <span>{{ course.credits }} 學分</span>
+                        <span>{{ course.dayLabel }}</span>
+                        <span>{{ course.timeLabel }}</span>
+                        <span v-if="course.classroom" class="classroom-chip">📍 {{ course.classroom }}</span>
+                        <span v-if="course.specialNotices?.length" class="schedule-change-chip">⚠ 課務異動</span>
+                    </div>
+
+                    <div v-if="expandedCourseKey === course.key" class="course-details">
+                        <dl>
+                            <div>
+                                <dt>科目代碼</dt>
+                                <dd>{{ course.code }}</dd>
+                            </div>
+                            <div>
+                                <dt>上課時間</dt>
+                                <dd>{{ course.scheduleText }}</dd>
+                            </div>
+                            <div>
+                                <dt>上課教室</dt>
+                                <dd>{{ course.classroom || '待公告' }}</dd>
+                            </div>
+                            <div>
+                                <dt>課程來源</dt>
+                                <dd>{{ sourceLabel(course) }}</dd>
+                            </div>
+                            <div>
+                                <dt>學制班別</dt>
+                                <dd>{{ course.degree || '碩士班' }}</dd>
+                            </div>
+                            <div v-if="course.unit">
+                                <dt>開課對象</dt>
+                                <dd>{{ course.unit }}</dd>
+                            </div>
+                            <div v-if="course.source === 'ELLM'">
+                                <dt>科目分類</dt>
+                                <dd>{{ course.subjectType }}</dd>
+                            </div>
+                        </dl>
+
+                        <div v-if="course.specialNotices?.length" class="schedule-change-panel">
+                            <strong>⚠ 課務異動</strong>
+                            <ul>
+                                <li v-for="notice in course.specialNotices" :key="notice">{{ notice }}</li>
+                            </ul>
+                        </div>
+
+                        <p v-if="course.locationNote" class="course-note location-note">
+                            📍 {{ course.locationNote }}
+                        </p>
+                        <p v-if="course.note" class="course-note">{{ course.note }}</p>
+                        <p v-if="course.flexible" class="course-note">
+                            此課程時間標示為未定或彈性，暫不納入固定時段衝堂判斷。
+                        </p>
+                        <p v-else-if="conflictCourseName(course)" class="course-note danger-note">
+                            與已選的「{{ conflictCourseName(course) }}」時段重疊。
+                        </p>
+
+                        <div class="course-calendar-actions no-print">
+                            <button
+                                type="button"
+                                class="calendar-button apple"
+                                :disabled="course.flexible"
+                                @click="exportCourseToApple(course)"
+                            >
+                                🍎 Apple 單筆
+                            </button>
+                            <button
+                                type="button"
+                                class="calendar-button google"
+                                :disabled="course.flexible"
+                                @click="exportCourseToGoogle(course)"
+                            >
+                                G Google 單筆
+                            </button>
+                        </div>
+                    </div>
+                </article>
+            </section>
+        </aside>
+
+        <aside v-else class="external-sidebar no-print">
+            <section class="qrysub-search-card">
+                <div class="section-heading">
+                    <div>
+                        <span class="section-kicker">NCCU QRYSub LIVE</span>
+                        <h2>政大全校課程查詢</h2>
+                    </div>
+                    <span :class="['lock-label', 'qrysub-state-' + qrysubUnitState]">
+                        {{ qrysubUnitStatusText }}
+                    </span>
+                </div>
+
+                <p class="page-description">
+                    先選擇學院與開課單位，再從政大115-1全校課程資料加入模擬課表；可重複查詢不同院系，系統會統一檢查衝堂。
+                </p>
+
+                <fieldset :disabled="qrysubUnitState !== 'online'">
+                    <div class="qrysub-search-grid">
+                        <label class="field-label">
+                            <span>{{ qrysubUnitSource === 'GITHUB_SNAPSHOT' ? '課程類別' : '學院' }} *</span>
+                            <select
+                                v-model="qrysubCollegeCode"
+                                class="filter-control"
+                                :disabled="qrysubCrossUnitSearch"
+                                @change="handleQrysubCollegeChange"
+                            >
+                                <option value="">{{ qrysubUnitSource === 'GITHUB_SNAPSHOT' ? '請選擇課程類別' : '請選擇學院' }}</option>
+                                <option
+                                    v-for="college in qrysubColleges"
+                                    :key="college.code"
+                                    :value="college.code"
+                                >
+                                    {{ college.name }}
+                                </option>
+                            </select>
+                        </label>
+
+                        <label class="field-label">
+                            <span>開課單位 *</span>
+                            <select
+                                v-model="qrysubDeptCode"
+                                class="filter-control"
+                                :disabled="qrysubCrossUnitSearch || !qrysubCollegeCode"
+                            >
+                                <option value="">請選擇系所／學程</option>
+                                <option
+                                    v-for="dept in qrysubDepartmentsForCollege"
+                                    :key="dept.code"
+                                    :value="dept.code"
+                                >
+                                    {{ dept.name }}{{ dept.level ? '｜' + dept.level : '' }}（{{ dept.code }}）
+                                </option>
+                            </select>
+                        </label>
+
+                        <label class="field-label">
+                            <span>關鍵字</span>
+                            <input
+                                v-model.trim="qrysubKeyword"
+                                class="filter-control"
+                                type="search"
+                                placeholder="課名、教師、備註或完整課號"
+                                @keyup.enter="searchQrysubCourses"
+                            >
+                        </label>
+
+                        <label class="eligibility-confirm qrysub-cross-unit-option">
+                            <input v-model="qrysubCrossUnitSearch" type="checkbox">
+                            <span>跨全部開課單位查詢（由GitHub全校CSV搜尋）</span>
+                        </label>
+
+                        <fieldset class="qrysub-checkbox-filter">
+                            <legend>星期（可複選）</legend>
+                            <div class="qrysub-checkbox-options weekday-options">
+                                <label v-for="day in [1, 2, 3, 4, 5, 6, 7]" :key="'qry-day-' + day">
+                                    <input v-model="qrysubWeek" type="checkbox" :value="String(day)">
+                                    <span>{{ day === 7 ? '日' : ['一','二','三','四','五','六'][day - 1] }}</span>
+                                </label>
+                            </div>
+                            <small>未勾選時顯示星期一至六；星期日須勾選後才顯示。</small>
+                        </fieldset>
+
+                        <fieldset class="qrysub-checkbox-filter">
+                            <legend>上課時段（可複選）</legend>
+                            <div class="qrysub-checkbox-options period-options">
+                                <label><input v-model="qrysubPeriods" type="checkbox" value="MORNING"><span>早上 1234C</span></label>
+                                <label><input v-model="qrysubPeriods" type="checkbox" value="NOON"><span>中午 C或D開頭</span></label>
+                                <label><input v-model="qrysubPeriods" type="checkbox" value="AFTERNOON"><span>下午 D5678E</span></label>
+                                <label><input v-model="qrysubPeriods" type="checkbox" value="EVENING"><span>晚上 FGH</span></label>
+                            </div>
+                        </fieldset>
+
+                        <fieldset class="qrysub-checkbox-filter">
+                            <legend>年級（可複選）</legend>
+                            <div class="qrysub-checkbox-options grade-options">
+                                <label><input v-model="qrysubGrades" type="checkbox" value="UG1"><span>大一</span></label>
+                                <label><input v-model="qrysubGrades" type="checkbox" value="UG2"><span>大二</span></label>
+                                <label><input v-model="qrysubGrades" type="checkbox" value="UG3"><span>大三</span></label>
+                                <label><input v-model="qrysubGrades" type="checkbox" value="UG4"><span>大四</span></label>
+                                <label><input v-model="qrysubGrades" type="checkbox" value="MASTER"><span>碩士班</span></label>
+                                <label><input v-model="qrysubGrades" type="checkbox" value="DOCTOR"><span>博士班</span></label>
+                                <label><input v-model="qrysubGrades" type="checkbox" value="OTHER"><span>不限／其他</span></label>
+                            </div>
+                            <small>未勾選時顯示全部；沒有明確年級資料的課程歸入「不限／其他」。</small>
+                        </fieldset>
+
+                        <label class="field-label">
+                            <span>授課語言</span>
+                            <select v-model="qrysubLanguage" class="filter-control">
+                                <option value="">不限</option>
+                                <option value="1">中文</option>
+                                <option value="2">英文</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <div class="qrysub-search-actions">
+                        <button
+                            type="button"
+                            class="external-submit-button"
+                            :disabled="(!qrysubCrossUnitSearch && !qrysubDeptCode) || qrysubSearchState === 'loading'"
+                            @click="searchQrysubCourses"
+                        >
+                            {{ qrysubSearchState === 'loading' ? '⌛ 查詢中…' : '🔎 查詢115-1課程' }}
+                        </button>
+                        <button
+                            type="button"
+                            class="mini-button"
+                            :disabled="qrysubUnitState === 'loading'"
+                            @click="loadQrysubUnits(true)"
+                        >
+                            ↻ 更新學院／系所
+                        </button>
+                        <a
+                            class="mini-button qrysub-official-link"
+                            href="https://qrysub.nccu.edu.tw/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            開啟政大課程查詢
+                        </a>
+                    </div>
+                </fieldset>
+
+                <div v-if="qrysubUnitError" class="qrysub-error">
+                    <strong>GitHub學院／系所資料載入失敗</strong>
+                    <span>{{ qrysubUnitError }}</span>
+                    <small>請確認NCCUCourseData的GitHub Actions已成功執行，且Repository設為公開。</small>
+                </div>
+
+                <div v-if="qrysubSearchError" class="qrysub-error">
+                    <strong>GitHub課程資料查詢失敗</strong>
+                    <span>{{ qrysubSearchError }}</span>
+                    <small>
+                        系統目前從GitHub Raw讀取全校CSV；請確認Actions已完成第一次更新。
+                    </small>
+                </div>
+            </section>
+
+            <section class="qrysub-result-panel">
+                <div class="section-heading">
+                    <div>
+                        <span class="section-kicker">LIVE RESULTS</span>
+                        <h2>GitHub全校課程查詢結果</h2>
+                    </div>
+                    <span class="result-count">{{ qrysubSearchResults.length }}</span>
+                </div>
+
+                <div
+                    v-if="qrysubSearchState === 'success' && qrysubSearchResults.some(course => course.department === '法學院碩士在職專班')"
+                    class="qrysub-fallback-notice"
+                >
+                    <strong>法學院碩士在職專班正式課表備援</strong>
+                    <span>GitHub資料暫時無法取得時，改用已核對的115-1專班課表，包含教室及特殊上課日期。</span>
+                </div>
+
+                <div v-if="qrysubSearchState === 'idle'" class="empty-state compact">
+                    <strong>尚未查詢</strong>
+                    <span>選擇學院與開課單位，即可查詢115-1課程。</span>
+                </div>
+
+                <div v-else-if="qrysubSearchState === 'loading'" class="empty-state compact">
+                    <strong>正在讀取政大課程資料</strong>
+                    <span>正從GitHub讀取政大全校課程CSV。</span>
+                </div>
+
+                <div
+                    v-else-if="qrysubSearchState === 'success' && qrysubSearchResults.length === 0"
+                    class="empty-state compact"
+                >
+                    <strong>沒有符合條件的課程</strong>
+                    <span>可取消關鍵字或星期限制後重新查詢。</span>
+                </div>
+
+                <article
+                    v-for="course in qrysubSearchResults"
+                    :key="course.key"
+                    :class="[
+                        'qrysub-result-card',
+                        {
+                            conflicting: qrysubCourseConflictName(course),
+                            added: isQrysubCourseAdded(course)
+                        }
+                    ]"
+                >
+                    <div class="qrysub-result-main">
+                        <div class="qrysub-result-title">
+                            <strong>{{ course.name }}</strong>
+                            <span>{{ course.teacher || '教師待定' }}</span>
+                        </div>
+
+                        <div class="qrysub-result-meta">
+                            <span>{{ course.code }}</span>
+                            <span>{{ course.credits }} 學分</span>
+                            <span v-if="course.kind">{{ course.kind }}</span>
+                            <span>{{ course.scheduleText }}</span>
+                            <span>📍 {{ course.classroom || '教室待公告' }}</span>
+                        </div>
+
+                        <p v-if="course.target" class="qrysub-result-subline">
+                            開課對象：{{ course.target }}
+                        </p>
+                        <p v-if="course.note" class="qrysub-result-note">
+                            {{ course.note }}
+                        </p>
+                        <div v-if="course.specialNotices?.length" class="qrysub-result-schedule-notice">
+                            <strong>⚠ 上課日期／教室提醒</strong>
+                            <span v-for="notice in course.specialNotices" :key="notice">{{ notice }}</span>
+                        </div>
+                        <p v-if="course.locationNote" class="qrysub-result-location-note">
+                            📍 {{ course.locationNote }}
+                        </p>
+                        <p v-if="course.unsupportedReason" class="qrysub-result-warning">
+                            ⚠ {{ course.unsupportedReason }}
+                        </p>
+                        <p v-else-if="qrysubCourseConflictName(course)" class="qrysub-result-warning">
+                            ⚠ 與已選的「{{ qrysubCourseConflictName(course) }}」衝堂，已鎖定且無法加入課表。
+                        </p>
+                    </div>
+
+                    <div class="qrysub-result-actions">
+                        <button
+                            type="button"
+                            :class="[
+                                'mini-button',
+                                { selected: isQrysubCourseAdded(course), danger: isQrysubCourseAdded(course) }
+                            ]"
+                            :disabled="Boolean(course.unsupportedReason) || (!isQrysubCourseAdded(course) && (qrysubSearchState !== 'success' || Boolean(qrysubCourseConflictName(course))))"
+                            @click="toggleQrysubCourse(course)"
+                        >
+                            {{ isQrysubCourseAdded(course) ? '－ 移除課表' : (qrysubCourseConflictName(course) ? '🔒 衝堂鎖定' : '＋ 加入課表') }}
+                        </button>
+
+                        <a
+                            v-if="course.syllabusUrl"
+                            class="mini-button"
+                            :href="course.syllabusUrl"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            教學大綱
+                        </a>
+                    </div>
+                </article>
+            </section>
+
+            <details class="manual-entry-details">
+                <summary>
+                    <span>
+                        <strong>找不到課程？手動輸入備援</strong>
+                        <small>供API無法取得、特殊課程或其他需要自行登錄的情形使用</small>
+                    </span>
+                    <span>展開</span>
+                </summary>
+
+                <section :class="['external-form-card', { locked: !courseDataReady }]">
+                    <div class="section-heading">
+                        <div>
+                            <span class="section-kicker">CUSTOM COURSE</span>
+                        <h2>自行輸入課程</h2>
+                        </div>
+                        <span class="lock-label">{{ courseDataReady ? '可輸入' : '資料未建立' }}</span>
+                    </div>
+
+                    <form @submit.prevent="addExternalCourse">
+                        <fieldset :disabled="!courseDataReady">
+                            <div class="external-form-grid">
+                                <label class="field-label">
+                                    <span>開課學院 *</span>
+                                    <input
+                                        v-model.trim="externalForm.institution"
+                                        class="filter-control"
+                                        placeholder="例如：社會科學學院"
+                                        required
+                                    >
+                                </label>
+                                <label class="field-label">
+                                    <span>開課系所</span>
+                                    <input v-model.trim="externalForm.department" class="filter-control">
+                                </label>
+                                <label class="field-label">
+                                    <span>科目代碼</span>
+                                    <input v-model.trim="externalForm.code" class="filter-control">
+                                </label>
+                                <label class="field-label">
+                                    <span>課程名稱 *</span>
+                                    <input v-model.trim="externalForm.name" class="filter-control" required>
+                                </label>
+                                <label class="field-label">
+                                    <span>授課教師</span>
+                                    <input v-model.trim="externalForm.teacher" class="filter-control">
+                                </label>
+                                <label class="field-label">
+                                    <span>上課教室</span>
+                                    <input
+                                        v-model.trim="externalForm.classroom"
+                                        class="filter-control"
+                                        placeholder="例如：綜合院館270112"
+                                    >
+                                </label>
+                                <label class="field-label">
+                                    <span>學分 *</span>
+                                    <select v-model.number="externalForm.credits" class="filter-control" required>
+                                        <option :value="1">1 學分</option>
+                                        <option :value="2">2 學分</option>
+                                        <option :value="3">3 學分</option>
+                                    </select>
+                                </label>
+                                <label class="field-label">
+                                    <span>星期 *</span>
+                                    <select v-model="externalForm.day" class="filter-control" required>
+                                        <option value="FLEX">未定／彈性</option>
+                                        <option v-for="day in timetableDays" :key="day.value" :value="String(day.value)">
+                                            {{ day.label }}
+                                        </option>
+                                    </select>
+                                </label>
+                                <label class="field-label" v-if="externalForm.day !== 'FLEX'">
+                                    <span>開始節次 *</span>
+                                    <select v-model="externalForm.startSlot" class="filter-control" required>
+                                        <option v-for="slot in slots" :key="'start-' + slot" :value="slot">
+                                            {{ slot }}｜{{ timeMap[slot] }}
+                                        </option>
+                                    </select>
+                                </label>
+                                <label class="field-label" v-if="externalForm.day !== 'FLEX'">
+                                    <span>結束節次 *</span>
+                                    <select v-model="externalForm.endSlot" class="filter-control" required>
+                                        <option v-for="slot in slots" :key="'end-' + slot" :value="slot">
+                                            {{ slot }}｜{{ timeMap[slot] }}
+                                        </option>
+                                    </select>
+                                </label>
+                                <label class="field-label external-note-field">
+                                    <span>備註</span>
+                                    <textarea
+                                        v-model.trim="externalForm.note"
+                                        class="filter-control external-textarea"
+                                        placeholder="例如：課程大綱、採認申請狀態或其他提醒"
+                                    ></textarea>
+                                </label>
+                            </div>
+
+                            <button type="submit" class="external-submit-button">＋ 新增並選取課程</button>
+                        </fieldset>
+                    </form>
+                </section>
+            </details>
+
+            <section v-if="customCourses.length > 0" class="custom-course-panel">
+                <div class="section-heading">
+                    <div>
+                        <span class="section-kicker">SELECTED COURSES</span>
+                        <h2>已選課程</h2>
+                    </div>
+                    <span class="result-count">{{ customCourses.length }}</span>
+                </div>
+
+                <article v-for="course in customCourses" :key="course.key" class="custom-course-card">
+                    <div>
+                        <div class="external-origin-row">
+                            <strong>{{ course.name }}</strong>
+                            <span :class="['external-origin-badge', course.externalOrigin === 'QRY_SUB' ? 'live' : 'manual']">
+                                {{ course.externalOrigin === 'QRY_SUB' ? 'GitHub課程資料' : '手動輸入' }}
+                            </span>
+                        </div>
+                        <span>
+                            {{ course.institution || '政大' }}
+                            {{ course.department ? '｜' + course.department : '' }}
+                        </span>
+                        <small>
+                            {{ course.scheduleText }}｜
+                            {{ course.classroom || '教室待公告' }}｜
+                            {{ course.credits }} 學分
+                        </small>
+                    </div>
+                    <div class="custom-course-actions">
+                        <button type="button" class="mini-button danger" @click="removeExternalCourse(course.key)">
+                            移除課表
+                        </button>
+                    </div>
+                </article>
+            </section>
+        </aside>
+
+        <section class="schedule-area">
+            <div class="schedule-toolbar no-print">
+                <div>
+                    <span class="section-kicker">SHARED WEEKLY TIMETABLE</span>
+                    <h2>115-1學期全校模擬課表</h2>
+                </div>
+                <div class="schedule-legend">
+                    <span><i class="legend-dot external-dot"></i>已加入課程</span>
+                </div>
+            </div>
+
+            <div class="print-heading">
+                <h2>政大全校115-1學期模擬課表</h2>
+                <p>
+                    2026/9/7–12/26｜已選 {{ activeCourses.length }} 門，共 {{ totalSelectedCredits }} 學分
+                </p>
+            </div>
+
+            <div class="schedule-scroll">
+                <div
+                    class="timetable-grid"
+                    :style="{ '--timetable-day-count': timetableDays.length }"
+                >
+                    <div class="grid-corner">節次</div>
+
+                    <div
+                        v-for="day in timetableDays"
+                        :key="'head-' + day.value"
+                        class="grid-day-header"
+                        :style="{ gridColumn: day.value + 1, gridRow: 1 }"
+                    >
+                        <strong>{{ day.short }}</strong>
+                        <span>{{ day.label }}</span>
+                    </div>
+
+                    <template v-for="(slot, slotIndex) in slots" :key="'slot-' + slot">
+                        <div
+                            class="grid-time-cell"
+                            :style="{ gridColumn: 1, gridRow: slotIndex + 2 }"
+                        >
+                            <strong>{{ slot }}</strong>
+                            <span>{{ timeMap[slot] }}</span>
+                        </div>
+
+                        <div
+                            v-for="day in timetableDays"
+                            :key="day.value + '-' + slot"
+                            class="grid-background-cell"
+                            :style="{ gridColumn: day.value + 1, gridRow: slotIndex + 2 }"
+                        ></div>
+                    </template>
+
+                    <article
+                        v-for="course in timetableCourseBlocks"
+                        :key="'block-' + course.renderKey"
+                        class="course-block"
+                        :style="courseGridStyle(course)"
+                    >
+                        <strong>{{ course.name }}</strong>
+                        <span>{{ sourceLabel(course) }}</span>
+                        <small>{{ course.credits }}學分｜{{ course.timeLabel }}</small>
+                        <small v-if="course.classroom">📍 {{ course.classroom }}</small>
+                        <small v-if="course.specialNotices?.length" class="block-change-note">⚠ 有課務異動</small>
+                    </article>
+                </div>
+            </div>
+
+            <section class="flexible-panel">
+                <div class="flexible-panel-heading">
+                    <div>
+                        <span class="section-kicker">FLEXIBLE COURSE</span>
+                        <h3>未定／彈性課程</h3>
+                    </div>
+                    <span>{{ activeFlexibleCourses.length }} 門已選</span>
+                </div>
+
+                <div v-if="activeFlexibleCourses.length === 0" class="flexible-empty">
+                    尚未選擇彈性課程。
+                </div>
+
+                <div v-else class="flexible-course-list">
+                    <article
+                        v-for="course in activeFlexibleCourses"
+                        :key="'flex-' + course.key"
+                        class="flexible-course-card"
+                        :style="{ borderLeftColor: course.color }"
+                    >
+                        <strong>{{ course.name }}</strong>
+                        <span>{{ sourceLabel(course) }}｜{{ course.teacher || '教師待定' }}｜{{ course.credits }}學分</span>
+                        <small>教室：{{ course.classroom || '待公告' }}｜實際上課時間待公告，不納入固定時段衝堂判斷。</small>
+                    </article>
+                </div>
+            </section>
+
+            <section class="selected-summary">
+                <div class="selected-summary-heading">
+                    <div>
+                        <span class="section-kicker">SELECTED COURSES</span>
+                        <h3>已選課程明細</h3>
+                    </div>
+                    <div class="selected-credit-breakdown" aria-label="學分統計">
+                        <span class="credit-pill total">
+                            總計 <strong>{{ totalSelectedCredits }}</strong>
+                        </span>
+                    </div>
+                </div>
+
+                <div v-if="activeCourses.length > 0" class="multi-calendar-actions no-print">
+                    <div>
+                        <strong>行事曆批次匯入</strong>
+                        <span>依目前已選課程產生實際上課事件；停課會排除、補課及教室異動會另行帶入。</span>
+                    </div>
+                    <div class="multi-calendar-buttons">
+                        <button type="button" class="calendar-button apple" @click="exportSelectedToApple">
+                            🍎 Apple 多筆
+                        </button>
+                        <button type="button" class="calendar-button google" @click="exportSelectedToGoogle">
+                            G Google 多筆
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="activeCourses.length === 0" class="summary-empty">
+                    請從不同課程頁面選擇課程，系統會跨頁檢查固定時段是否衝堂。
+                </div>
+
+                <div v-else class="summary-table-wrap">
+                    <table class="summary-table">
+                        <thead>
+                            <tr>
+                                <th>來源</th>
+                                <th>星期／時段</th>
+                                <th>課程</th>
+                                <th>開課單位</th>
+                                <th>教師</th>
+                                <th>教室</th>
+                                <th>學分</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="course in sortedActiveCourses" :key="'summary-' + course.key">
+                                <td>{{ sourceLabel(course) }}</td>
+                                <td>{{ course.scheduleText }}</td>
+                                <td>
+                                    <strong>{{ course.name }}</strong>
+                                    <small v-if="course.specialNotices?.length" class="summary-change-note">
+                                        {{ course.specialNotices.join('；') }}
+                                    </small>
+                                </td>
+                                <td>
+                                    {{ course.department || course.unit || sourceLabel(course) }}
+                                </td>
+                                <td>{{ course.teacher || '教師待定' }}</td>
+                                <td>{{ course.classroom || '待公告' }}</td>
+                                <td>{{ course.credits }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <footer class="app-footer no-print">
+        <span>資料範圍：政大115學年度第1學期全校課程；支援跨院系模擬排課。</span>
+        <span>本系統不取代正式選課，課程與修課資格以校方公告為準。</span>
+    </footer>
+
+    <div v-if="toastMessage" class="toast" role="status">{{ toastMessage }}</div>
+</div>
+<script src="script.js"></script>
+</body>
+</html>
