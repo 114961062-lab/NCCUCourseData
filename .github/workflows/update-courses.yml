@@ -1,50 +1,279 @@
-name: 更新政大課程 CSV
+name: 更新政大115-1課程資料
 
 on:
+  # 可從Actions頁面手動執行
   workflow_dispatch:
+
+  # 每6小時自動執行一次
+  # GitHub Actions使用UTC時間
   schedule:
-    # 每6小時執行一次；GitHub Actions排程使用UTC。
     - cron: "37 */6 * * *"
 
+  # 修改Workflow或Python程式時自動測試
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/update-courses.yml"
+      - "scripts/update_courses.py"
+
+# 允許Workflow將CSV提交回Repository
 permissions:
   contents: write
 
+# 新執行開始時，自動取消同一組尚未完成的舊執行
 concurrency:
   group: nccu-course-csv-update
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   update-courses:
+    name: 抓取並更新政大全校課程
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+
+    # Runner開始執行後，最多允許45分鐘
+    timeout-minutes: 45
+
+    env:
+      # 讓Python執行紀錄即時顯示
+      PYTHONUNBUFFERED: "1"
+
+      # 政大學期
+      NCCU_SEMESTER: "1151"
+
+      # 現有Cloudflare Worker
+      NCCU_PROXY_URL: "https://nccu-course-proxy.114961062.workers.dev"
+
+      # 同時抓取單位數
+      NCCU_MAX_WORKERS: "3"
+
+      # 單位查詢失敗時的重試次數
+      NCCU_RETRIES: "3"
+
+      # 避免異常空資料覆蓋正常CSV
+      NCCU_MIN_COURSES: "500"
 
     steps:
-      - name: 取得 Repository
-        uses: actions/checkout@v4
+      # 第一階段：確認Runner已經啟動
+      - name: 確認GitHub Runner
+        run: |
+          echo "GitHub Runner已成功啟動"
+          echo "開始時間：$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Repository：${GITHUB_REPOSITORY}"
+          echo "Branch：${GITHUB_REF_NAME}"
+          echo "Workflow：${GITHUB_WORKFLOW}"
 
-      - name: 設定 Python
+      # 第二階段：取得main分支完整內容
+      - name: 取得Repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # 第三階段：安裝Python
+      - name: 設定Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
-      - name: 抓取政大全校課程並產生 CSV
-        env:
-          NCCU_SEMESTER: "1151"
-          NCCU_PROXY_URL: "https://nccu-course-proxy.114961062.workers.dev"
-          NCCU_MAX_WORKERS: "3"
-          NCCU_RETRIES: "3"
-          NCCU_MIN_COURSES: "500"
-        run: python scripts/update_courses.py
+      # 第四階段：檢查Repository資料夾結構
+      - name: 檢查必要檔案
+        shell: bash
+        run: |
+          echo "檢查Repository結構……"
 
-      - name: 僅在資料變更時提交
+          if [ ! -f "scripts/update_courses.py" ]; then
+            echo "::error::找不到 scripts/update_courses.py"
+            exit 1
+          fi
+
+          if [ ! -d "data" ]; then
+            echo "::error::找不到 data 資料夾"
+            exit 1
+          fi
+
+          echo "必要檔案與資料夾均存在"
+          echo "目前檔案："
+          find . -maxdepth 3 -type f \
+            -not -path "./.git/*" \
+            | sort
+
+      # 第五階段：先檢查Python語法
+      - name: 檢查Python程式語法
+        run: |
+          python --version
+          python -m py_compile scripts/update_courses.py
+          echo "Python語法檢查完成"
+
+      # 第六階段：抓取278個開課單位
+      - name: 抓取政大全校課程並產生CSV
+        shell: bash
+        run: |
+          set -o pipefail
+          echo "開始抓取政大${NCCU_SEMESTER}學期課程……"
+          python scripts/update_courses.py 2>&1 | tee update-courses.log
+
+      # 第七階段：檢查產出資料
+      - name: 驗證CSV及JSON
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          from pathlib import Path
+
+          csv_file = Path("data/nccu_courses_1151.csv")
+          units_file = Path("data/units.json")
+          metadata_file = Path("data/metadata.json")
+
+          required_files = [
+              csv_file,
+              units_file,
+              metadata_file,
+          ]
+
+          for path in required_files:
+              if not path.exists():
+                  raise SystemExit(f"缺少必要檔案：{path}")
+
+              if path.stat().st_size == 0:
+                  raise SystemExit(f"檔案內容為空：{path}")
+
+          with csv_file.open(
+              "r",
+              encoding="utf-8-sig",
+              newline=""
+          ) as handle:
+              rows = list(csv.DictReader(handle))
+
+          with units_file.open(
+              "r",
+              encoding="utf-8"
+          ) as handle:
+              units = json.load(handle)
+
+          with metadata_file.open(
+              "r",
+              encoding="utf-8"
+          ) as handle:
+              metadata = json.load(handle)
+
+          minimum = int(
+              os.environ.get("NCCU_MIN_COURSES", "500")
+          )
+
+          if len(rows) < minimum:
+              raise SystemExit(
+                  f"課程數量異常：僅有{len(rows)}門，"
+                  f"最低要求為{minimum}門"
+              )
+
+          if not isinstance(units, list) or not units:
+              raise SystemExit("units.json沒有開課單位資料")
+
+          course_numbers = [
+              row.get("subNum", "").strip()
+              for row in rows
+              if row.get("subNum", "").strip()
+          ]
+
+          duplicate_count = (
+              len(course_numbers) -
+              len(set(course_numbers))
+          )
+
+          print(f"CSV課程數：{len(rows)}")
+          print(f"重複課號數：{duplicate_count}")
+          print(
+              "metadata課程數："
+              f"{metadata.get('courseCount', '未提供')}"
+          )
+          print(
+              "metadata單位數："
+              f"{metadata.get('unitCount', '未提供')}"
+          )
+          print(
+              "更新狀態："
+              f"{metadata.get('status', '未提供')}"
+          )
+
+          if duplicate_count:
+              raise SystemExit(
+                  f"CSV仍有{duplicate_count}筆重複課號"
+              )
+
+          summary_file = os.environ.get(
+              "GITHUB_STEP_SUMMARY"
+          )
+
+          if summary_file:
+              with open(
+                  summary_file,
+                  "a",
+                  encoding="utf-8"
+              ) as summary:
+                  summary.write(
+                      "## 政大課程更新結果\n\n"
+                  )
+                  summary.write(
+                      f"- 課程數：{len(rows)}門\n"
+                  )
+                  summary.write(
+                      f"- 開課單位："
+                      f"{metadata.get('unitCount', '未提供')}個\n"
+                  )
+                  summary.write(
+                      f"- 更新狀態："
+                      f"{metadata.get('status', '未提供')}\n"
+                  )
+                  summary.write(
+                      f"- 更新時間："
+                      f"{metadata.get('updatedAtUtc', '未提供')}\n"
+                  )
+          PY
+
+      # 第八階段：提交更新後的資料
+      - name: 提交課程資料至main分支
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/nccu_courses_1151.csv data/units.json data/metadata.json
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            data/nccu_courses_1151.csv \
+            data/units.json \
+            data/metadata.json
+
           if git diff --cached --quiet; then
-            echo "課程資料沒有變更，不建立新 commit。"
+            echo "課程資料沒有變更，不建立新Commit。"
             exit 0
           fi
-          git commit -m "自動更新政大115-1課程資料"
-          git push
 
+          git commit \
+            -m "自動更新政大115-1課程資料"
+
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+          echo "課程資料已成功提交至main分支"
+
+      # 無論成功或失敗，都保存執行紀錄
+      - name: 保存抓取紀錄
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nccu-course-update-log-${{ github.run_number }}
+          path: update-courses.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # 最後顯示執行狀態
+      - name: 顯示完成時間
+        if: always()
+        run: |
+          echo "結束時間：$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Workflow執行編號：${GITHUB_RUN_NUMBER}"
+          echo "Workflow執行結果請查看上方各步驟。"
