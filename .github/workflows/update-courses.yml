@@ -75,7 +75,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
+
 
       # 第四階段：檢查Repository資料夾結構
       - name: 檢查必要檔案
