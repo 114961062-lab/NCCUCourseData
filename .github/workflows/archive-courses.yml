@@ -1,0 +1,142 @@
+name: 封存政大100至114學年度歷史課表
+
+on:
+  workflow_dispatch:
+    inputs:
+      academic_year:
+        description: "學年度（限100至114，例如113）"
+        required: true
+        default: "114"
+        type: string
+      semester:
+        description: "要封存的學期"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - "1"
+          - "2"
+      overwrite:
+        description: "是否覆寫已成功封存的歷史CSV"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nccu-course-history-archive
+  cancel-in-progress: false
+
+jobs:
+  archive-courses:
+    name: 封存${{ inputs.academic_year }}學年度歷史課表
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      NCCU_PROXY_URL: "https://nccu-course-proxy.114961062.workers.dev"
+      NCCU_MAX_WORKERS: "3"
+      NCCU_RETRIES: "3"
+      NCCU_MIN_COURSES: "500"
+
+    steps:
+      - name: 取得Repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: 設定Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 檢查輸入與程式
+        shell: bash
+        run: |
+          year="${{ inputs.academic_year }}"
+          if ! [[ "$year" =~ ^(10[0-9]|11[0-4])$ ]]; then
+            echo "::error::學年度必須介於100至114。"
+            exit 1
+          fi
+          test -f scripts/update_courses.py || { echo "::error::找不到scripts/update_courses.py"; exit 1; }
+          test -f scripts/archive_courses.py || { echo "::error::找不到scripts/archive_courses.py"; exit 1; }
+          python -m py_compile scripts/update_courses.py scripts/archive_courses.py
+
+      - name: 封存所選學期
+        shell: bash
+        env:
+          NCCU_ARCHIVE_OVERWRITE: "${{ inputs.overwrite }}"
+        run: |
+          set -o pipefail
+          year="${{ inputs.academic_year }}"
+          selection="${{ inputs.semester }}"
+
+          if [ "$selection" = "both" ]; then
+            terms="1 2"
+          else
+            terms="$selection"
+          fi
+
+          for term in $terms; do
+            semester_code="${year}${term}"
+            echo "========== 開始封存 ${semester_code} =========="
+            NCCU_ARCHIVE_SEMESTER="$semester_code" \
+              python scripts/archive_courses.py 2>&1 \
+              | tee -a history-archive.log
+          done
+
+      - name: 驗證歷史索引
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          index_file = Path("data/history/index.json")
+          if not index_file.exists():
+              raise SystemExit("找不到data/history/index.json")
+
+          with index_file.open("r", encoding="utf-8") as handle:
+              index = json.load(handle)
+
+          if not isinstance(index.get("semesters"), list):
+              raise SystemExit("歷史索引格式不正確")
+
+          for item in index["semesters"]:
+              csv_path = Path(item["csvPath"])
+              if not csv_path.exists() or csv_path.stat().st_size == 0:
+                  raise SystemExit(f"歷史CSV不存在或為空：{csv_path}")
+
+          print(f"目前已封存{len(index['semesters'])}個學期")
+          PY
+
+      - name: 提交歷史資料至main分支
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/history
+
+          if git diff --cached --quiet; then
+            echo "歷史資料沒有變更，不建立新Commit。"
+            exit 0
+          fi
+
+          git commit -m "封存政大${{ inputs.academic_year }}學年度歷史課表"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: 保存封存紀錄
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nccu-history-${{ inputs.academic_year }}-${{ github.run_number }}
+          path: history-archive.log
+          if-no-files-found: ignore
+          retention-days: 7
+
