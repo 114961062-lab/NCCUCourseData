@@ -1,7 +1,6 @@
 name: Update NCCU Course Remain
 
 on:
-  # 可隨時手動執行
   workflow_dispatch:
 
   schedule:
@@ -10,11 +9,16 @@ on:
     - cron: "15 * * * *"
 
     # 非選課期間：每月 1 日台灣時間 08:30 更新一次
-    # GitHub Actions 使用 UTC
+    # GitHub Actions cron 使用 UTC
+    # UTC 00:30 = 台灣時間 08:30
     - cron: "30 0 1 * *"
 
 permissions:
   contents: write
+
+concurrency:
+  group: nccu-course-remain
+  cancel-in-progress: false
 
 jobs:
   update-remain:
@@ -25,8 +29,6 @@ jobs:
         id: schedule_check
         shell: bash
         run: |
-          # GitHub Actions cron 使用 UTC，
-          # 這裡轉成 Asia/Taipei 判斷日期及時間
           export TZ=Asia/Taipei
 
           NOW_DATE=$(date +%Y-%m-%d)
@@ -38,26 +40,26 @@ jobs:
           echo "Schedule: ${{ github.event.schedule }}"
 
           SHOULD_RUN=false
-          REASON=""
+          REASON="Outside registration period"
 
-          # -------------------------------------------------
-          # 手動執行：永遠執行
-          # -------------------------------------------------
+          # ============================================
+          # 手動執行
+          # ============================================
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             SHOULD_RUN=true
             REASON="Manual run"
 
-          # -------------------------------------------------
-          # 每月一次的排程：永遠執行
-          # -------------------------------------------------
+          # ============================================
+          # 每月定期更新
+          # ============================================
           elif [ "${{ github.event.schedule }}" = "30 0 1 * *" ]; then
             SHOULD_RUN=true
             REASON="Monthly update"
 
-          # -------------------------------------------------
+          # ============================================
           # 115-1 第一階段初選
           # 2026/08/25 09:00 ～ 2026/08/26 17:00
-          # -------------------------------------------------
+          # ============================================
           elif \
             { [ "$NOW_DATE" = "2026-08-25" ] && [ "$NOW_TIME" -ge 0900 ]; } || \
             { [ "$NOW_DATE" = "2026-08-26" ] && [ "$NOW_TIME" -le 1700 ]; }
@@ -65,10 +67,10 @@ jobs:
             SHOULD_RUN=true
             REASON="115-1 first registration period"
 
-          # -------------------------------------------------
+          # ============================================
           # 115-1 第二階段初選
           # 2026/08/31 09:00 ～ 2026/09/02 17:00
-          # -------------------------------------------------
+          # ============================================
           elif \
             { [ "$NOW_DATE" = "2026-08-31" ] && [ "$NOW_TIME" -ge 0900 ]; } || \
             { [ "$NOW_DATE" = "2026-09-01" ]; } || \
@@ -77,10 +79,10 @@ jobs:
             SHOULD_RUN=true
             REASON="115-1 second registration period"
 
-          # -------------------------------------------------
-          # 115-1 第三階段最後加退選
+          # ============================================
+          # 115-1 第三階段加退選
           # 2026/09/07 09:00 ～ 2026/09/14 17:00
-          # -------------------------------------------------
+          # ============================================
           elif \
             { [ "$NOW_DATE" = "2026-09-07" ] && [ "$NOW_TIME" -ge 0900 ]; } || \
             { [ "$NOW_DATE" \> "2026-09-07" ] && [ "$NOW_DATE" \< "2026-09-14" ]; } || \
@@ -89,9 +91,6 @@ jobs:
             SHOULD_RUN=true
             REASON="115-1 add/drop period"
 
-          else
-            SHOULD_RUN=false
-            REASON="Outside registration period"
           fi
 
           echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
@@ -100,11 +99,11 @@ jobs:
           echo "Decision: $SHOULD_RUN"
           echo "Reason: $REASON"
 
-      - name: Stop outside update period
+      - name: Skip outside update period
         if: steps.schedule_check.outputs.should_run != 'true'
         run: |
           echo "目前不是選課期間，也不是每月定期更新日。"
-          echo "本次不抓取政大選課人數。"
+          echo "本次不抓取全校選課人數。"
 
       - name: Checkout repository
         if: steps.schedule_check.outputs.should_run == 'true'
@@ -133,6 +132,13 @@ jobs:
         run: |
           echo "===== nccu_course_remain_1151.csv ====="
           head -20 data/nccu_course_remain_1151.csv
+
+      - name: Show file statistics
+        if: steps.schedule_check.outputs.should_run == 'true'
+        run: |
+          echo "===== File statistics ====="
+          wc -l data/nccu_course_remain_1151.csv
+          ls -lh data/nccu_course_remain_1151.csv
 
       - name: Commit updated remain data
         if: steps.schedule_check.outputs.should_run == 'true'
