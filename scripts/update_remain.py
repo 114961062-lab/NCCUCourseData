@@ -14,13 +14,6 @@ from urllib3.poolmanager import PoolManager
 INPUT_CSV = Path("data/nccu_courses_1151.csv")
 OUTPUT_CSV = Path("data/nccu_course_remain_1151.csv")
 
-# 第一階段先只抓法學院相關單位
-TARGET_DEPARTMENTS = {
-    "961",  # 法碩在職專班
-    "651",  # 法律系碩士班
-    "652",  # 法科所
-}
-
 
 class LegacySSLAdapter(HTTPAdapter):
     def init_poolmanager(
@@ -79,6 +72,13 @@ def safe_int(value):
         return None
 
 
+def normalize_bool(value):
+    if value is None:
+        return ""
+
+    return "true" if value else "false"
+
+
 def parse_remain_detail(session, url):
     response = session.get(
         url,
@@ -106,7 +106,9 @@ def parse_remain_detail(session, url):
         "addable": None,
     }
 
+    # -------------------------------------------------
     # 基本資料
+    # -------------------------------------------------
     for table in tables:
         for row in table.find_all("tr"):
             cells = [
@@ -141,7 +143,9 @@ def parse_remain_detail(session, url):
                     safe_int(value)
                 )
 
+    # -------------------------------------------------
     # 找「全校 All Colleges」
+    # -------------------------------------------------
     for table in tables:
         rows = table.find_all("tr")
 
@@ -210,13 +214,6 @@ def parse_remain_detail(session, url):
     return result
 
 
-def normalize_bool(value):
-    if value is None:
-        return ""
-
-    return "true" if value else "false"
-
-
 def main():
     if not INPUT_CSV.exists():
         raise FileNotFoundError(
@@ -224,8 +221,6 @@ def main():
         )
 
     session = create_session()
-
-    output_rows = []
 
     with INPUT_CSV.open(
         "r",
@@ -235,11 +230,18 @@ def main():
         reader = csv.DictReader(f)
         rows = list(reader)
 
+    # -------------------------------------------------
+    # 全校：
+    # 有 subNum + subRemainUrl 就抓
+    # 同一課號只抓一次
+    # -------------------------------------------------
     target_rows = []
 
+    seen_courses = set()
+
     for row in rows:
-        department_code = (
-            row.get("departmentCode", "")
+        sub_num = (
+            row.get("subNum", "")
             .strip()
         )
 
@@ -248,52 +250,70 @@ def main():
             .strip()
         )
 
-        sub_num = (
-            row.get("subNum", "")
-            .strip()
-        )
-
-        if department_code not in TARGET_DEPARTMENTS:
+        if not sub_num:
             continue
 
         if not remain_url:
             continue
 
-        if not sub_num:
+        if sub_num in seen_courses:
             continue
+
+        seen_courses.add(sub_num)
 
         target_rows.append(row)
 
     print(
-        f"準備抓取 {len(target_rows)} 門課餘額"
+        f"全校原始課程筆數：{len(rows)}"
+    )
+
+    print(
+        f"準備抓取餘額課程數：{len(target_rows)}"
     )
 
     updated_at = datetime.now(
         ZoneInfo("Asia/Taipei")
     ).isoformat(timespec="seconds")
 
+    output_rows = []
+
+    success_count = 0
+    error_count = 0
+
     for index, row in enumerate(
         target_rows,
         start=1
     ):
-        sub_num = row.get(
-            "subNum",
-            ""
-        ).strip()
+        sub_num = (
+            row.get("subNum", "")
+            .strip()
+        )
 
-        sub_name = row.get(
-            "subNam",
-            ""
-        ).strip()
+        sub_name = (
+            row.get("subNam", "")
+            .strip()
+        )
 
-        remain_url = row.get(
-            "subRemainUrl",
-            ""
-        ).strip()
+        department_code = (
+            row.get("departmentCode", "")
+            .strip()
+        )
+
+        department_name = (
+            row.get("departmentName", "")
+            .strip()
+        )
+
+        remain_url = (
+            row.get("subRemainUrl", "")
+            .strip()
+        )
 
         print(
             f"[{index}/{len(target_rows)}] "
-            f"{sub_num} {sub_name}"
+            f"{department_code} "
+            f"{sub_num} "
+            f"{sub_name}"
         )
 
         try:
@@ -305,6 +325,10 @@ def main():
             output_rows.append({
                 "subNum": sub_num,
                 "subNam": sub_name,
+                "departmentCode":
+                    department_code,
+                "departmentName":
+                    department_name,
                 "registeredCount":
                     data["registeredCount"]
                     if data["registeredCount"] is not None
@@ -331,8 +355,11 @@ def main():
                     ),
                 "remainUpdatedAt":
                     updated_at,
-                "status": "ok",
+                "status":
+                    "ok",
             })
+
+            success_count += 1
 
             print(
                 "  已選:",
@@ -344,6 +371,8 @@ def main():
             )
 
         except Exception as error:
+            error_count += 1
+
             print(
                 f"  抓取失敗：{error}"
             )
@@ -351,6 +380,10 @@ def main():
             output_rows.append({
                 "subNum": sub_num,
                 "subNam": sub_name,
+                "departmentCode":
+                    department_code,
+                "departmentName":
+                    department_name,
                 "registeredCount": "",
                 "remainingSeats": "",
                 "waitingCount": "",
@@ -363,8 +396,10 @@ def main():
                     f"error: {error}",
             })
 
-        # 不要對政大網站打太快
-        time.sleep(0.4)
+        # -------------------------------------------------
+        # 全校大量抓取，不要對政大網站打太快
+        # -------------------------------------------------
+        time.sleep(0.5)
 
     OUTPUT_CSV.parent.mkdir(
         parents=True,
@@ -374,6 +409,8 @@ def main():
     fieldnames = [
         "subNum",
         "subNam",
+        "departmentCode",
+        "departmentName",
         "registeredCount",
         "remainingSeats",
         "waitingCount",
@@ -398,9 +435,17 @@ def main():
         writer.writerows(output_rows)
 
     print()
+    print("==============================")
+    print("全校課程餘額更新完成")
+    print("==============================")
     print(
-        f"完成，共寫入 "
-        f"{len(output_rows)} 筆"
+        f"總筆數：{len(output_rows)}"
+    )
+    print(
+        f"成功：{success_count}"
+    )
+    print(
+        f"失敗：{error_count}"
     )
     print(
         f"輸出：{OUTPUT_CSV}"
