@@ -121,7 +121,13 @@ def parse_args() -> argparse.Namespace:
         "--input",
         type=Path,
         default=None,
-        help="Source CSV. Defaults to data/nccu_courses_<semester>.csv.",
+        help="Current source CSV. Defaults to data/nccu_courses_<semester>.csv.",
+    )
+    parser.add_argument(
+        "--history-root",
+        type=Path,
+        default=Path("data/history"),
+        help="Root containing <semester>/nccu_courses_<semester>.csv history files.",
     )
     parser.add_argument(
         "--output",
@@ -158,11 +164,9 @@ def parse_time(value: str) -> tuple[str, str]:
     rebuilt = "".join(day + slots for day, slots in matches)
     if not matches or rebuilt != raw:
         raise DataError(f"unsupported class time: {value!r}")
-    if len(matches) != 1:
-        raise DataError(
-            f"multiple meeting days cannot fit the target columns: {value!r}"
-        )
-
+    # The legacy target format has only one day/slots pair. For a historical
+    # course with several weekly meetings, retain the first listed meeting,
+    # matching the behavior of the existing historical CSV.
     day_text, slot_text = matches[0]
     slots = list(slot_text.upper())
     if len(slots) != len(set(slots)):
@@ -315,17 +319,62 @@ def convert(rows: list[dict[str, str]], semester: str) -> list[dict[str, str]]:
     return output
 
 
-def validate_output(rows: list[dict[str, str]], semester: str) -> None:
+def discover_sources(
+    current_source: Path,
+    current_semester: str,
+    history_root: Path,
+) -> list[tuple[str, Path]]:
+    sources: dict[str, Path] = {}
+    if history_root.is_dir():
+        for path in sorted(history_root.glob("*/nccu_courses_*.csv")):
+            match = re.fullmatch(r"nccu_courses_(\d{4})\.csv", path.name)
+            if not match:
+                continue
+            semester = match.group(1)
+            if path.parent.name != semester:
+                raise DataError(
+                    f"history folder and filename semesters differ: {path}"
+                )
+            if semester in sources:
+                raise DataError(f"duplicate source semester {semester}: {path}")
+            sources[semester] = path
+
+    if current_source.is_file():
+        if current_semester in sources:
+            raise DataError(
+                f"semester {current_semester} exists in both history and current data"
+            )
+        sources[current_semester] = current_source
+    else:
+        raise DataError(f"current source CSV does not exist: {current_source}")
+
+    return sorted(sources.items(), key=lambda item: int(item[0]))
+
+
+def convert_sources(sources: list[tuple[str, Path]]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    for semester, path in sources:
+        semester_rows = load_source(path, semester)
+        converted = convert(semester_rows, semester)
+        print(f"- {semester}: {len(converted)} courses from {path}")
+        output.extend(converted)
+    return output
+
+
+def validate_output(rows: list[dict[str, str]]) -> None:
     if not rows:
         raise DataError("output is empty")
     ids = [row["id"] for row in rows]
-    course_numbers = [row["CourseNumber"] for row in rows]
+    semester_courses = [
+        (row["id"][:4], row["CourseNumber"])
+        for row in rows
+    ]
     if len(ids) != len(set(ids)):
         raise DataError("output contains duplicate IDs")
-    if len(course_numbers) != len(set(course_numbers)):
-        raise DataError("output contains duplicate CourseNumbers")
-    if any(not value.startswith(semester) for value in ids):
-        raise DataError("an output ID has the wrong semester prefix")
+    if len(semester_courses) != len(set(semester_courses)):
+        raise DataError("output contains duplicate CourseNumbers within a semester")
+    if any(not re.fullmatch(r"\d{7}", value) for value in ids):
+        raise DataError("an output ID is not a seven-digit semester ID")
     if any(set(row) != set(OUTPUT_FIELDS) for row in rows):
         raise DataError("an output row has incorrect columns")
 
@@ -341,13 +390,19 @@ def write_output(path: Path, rows: list[dict[str, str]]) -> None:
 def main() -> int:
     args = parse_args()
     semester = clean(args.semester)
-    source = args.input or Path(f"data/nccu_courses_{semester}.csv")
-    rows = convert(load_source(source, semester), semester)
-    validate_output(rows, semester)
+    current_source = args.input or Path(f"data/nccu_courses_{semester}.csv")
+    sources = discover_sources(current_source, semester, args.history_root)
+    print(f"Found {len(sources)} semesters; building one combined CSV.")
+    rows = convert_sources(sources)
+    validate_output(rows)
     write_output(args.output, rows)
 
     counts = Counter(row["program"] for row in rows)
-    print(f"Created {args.output} with {len(rows)} courses for {semester}.")
+    semesters = sorted({row["id"][:4] for row in rows}, key=int)
+    print(
+        f"Created {args.output} with {len(rows)} courses across "
+        f"{len(semesters)} semesters ({semesters[0]}-{semesters[-1]})."
+    )
     for program in ("法碩專班", "法律系碩士班", "法科所"):
         print(f"- {program}: {counts[program]}")
     print(f"- 基礎科目: {sum(row['isBase'] == 'True' for row in rows)}")
