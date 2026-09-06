@@ -1,0 +1,104 @@
+name: 整理法學院課程 CSV
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - 更新政大課程 CSV
+    types:
+      - completed
+  schedule:
+    # 作為保險，每6小時在全校資料更新後再檢查一次。
+    - cron: "50 */6 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - "data/nccu_courses_1151.csv"
+      - "scripts/build_law_courses.py"
+      - ".github/workflows/build-law-courses.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nccu-law-course-csv
+  cancel-in-progress: true
+
+jobs:
+  build-law-courses:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      NCCU_SEMESTER: "1151"
+
+    steps:
+      - name: 取得最新課程資料
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: 設定 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 整理法學院三個班別
+        shell: bash
+        run: |
+          python scripts/build_law_courses.py \
+            --semester "${NCCU_SEMESTER}" \
+            --input "data/nccu_courses_${NCCU_SEMESTER}.csv" \
+            --output "data/nccuellmcourse.csv"
+
+      - name: 執行程式測試
+        run: python -m unittest discover -s tests -p "test_build_law_courses.py" -v
+
+      - name: 顯示整理結果
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import os
+          from collections import Counter
+          from pathlib import Path
+
+          path = Path("data/nccuellmcourse.csv")
+          with path.open("r", encoding="utf-8", newline="") as handle:
+              rows = list(csv.DictReader(handle))
+
+          counts = Counter(row["program"] for row in rows)
+          summary = [
+              "## 法學院課程整理結果\n",
+              f"- 全部課程：{len(rows)} 門",
+              f"- 法碩專班：{counts['法碩專班']} 門",
+              f"- 法律系碩士班：{counts['法律系碩士班']} 門",
+              f"- 法科所：{counts['法科所']} 門",
+              f"- 暑期課程：{sum(r['isSmr'] == 'True' for r in rows)} 門",
+          ]
+          print("\n".join(summary))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(summary) + "\n")
+          PY
+
+      - name: 僅在內容變更時提交
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/nccuellmcourse.csv
+
+          if git diff --cached --quiet; then
+            echo "法學院課程資料沒有變更，不建立新提交。"
+            exit 0
+          fi
+
+          git commit -m "自動整理法學院115-1課程資料"
+          git pull --rebase origin main
+          git push origin HEAD:main
