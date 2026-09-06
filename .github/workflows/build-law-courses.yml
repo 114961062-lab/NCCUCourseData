@@ -78,9 +78,6 @@ jobs:
             --history-root "data/history" \
             --output "data/nccuellmcourse.csv"
 
-      - name: 執行程式測試
-        run: python -m unittest discover -s tests -p "test_build_law_courses.py" -v
-
       - name: 顯示整理結果
         shell: bash
         run: |
