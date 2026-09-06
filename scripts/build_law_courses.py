@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""Convert NCCU's all-campus course CSV into the law-program CSV used by the site."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import re
+from collections import Counter
+from pathlib import Path
+
+
+OUTPUT_FIELDS = [
+    "id",
+    "name",
+    "teacher",
+    "day",
+    "slots",
+    "credit",
+    "isBase",
+    "isLang",
+    "CourseNumber",
+    "program",
+    "isSmr",
+]
+
+REQUIRED_INPUT_FIELDS = {
+    "semester",
+    "departmentCode",
+    "subNum",
+    "subNam",
+    "teaNam",
+    "subPoint",
+    "subTime",
+    "subKind",
+    "note",
+}
+
+# The number range keeps IDs compatible with the existing website data:
+# 001-099 ELLM, 101-199 law master's, 201-299 interdisciplinary law.
+PROGRAMS = {
+    "961": {"program": "法碩專班", "id_start": 1},
+    "651": {"program": "法律系碩士班", "id_start": 101},
+    "652": {"program": "法科所", "id_start": 201},
+}
+
+PROGRAM_ORDER = ("961", "651", "652")
+
+ELLM_BASE_COURSES = {
+    "行政法",
+    "民法債編總論",
+    "刑法分則",
+    "刑事訴訟法",
+    "物權法",
+    "勞社法導論",
+    "法學導論",
+    "論文寫作專題研究",
+    "法律倫理",
+    "民事訴訟法",
+    "刑法總則",
+    "民法總則",
+    "憲法",
+    "民法債編各論",
+    "公司法",
+}
+
+LANGUAGE_NAME_PATTERNS = (
+    "法學名著選讀",
+    "公法學名著選讀",
+    "英文契約選讀",
+    "英文契約導讀及撰寫",
+    "法學英文",
+    "法學法文",
+    "進階德文",
+    "英國契約法",
+)
+
+DAY_NUMBERS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "日": 7,
+    "天": 7,
+}
+
+FLEXIBLE_TIMES = {"", "未定", "未定或彈性", "彈性", "另訂", "時間另訂"}
+
+PERIODS = (
+    ("1", "08:10", "09:00"),
+    ("2", "09:10", "10:00"),
+    ("3", "10:10", "11:00"),
+    ("4", "11:10", "12:00"),
+    ("C", "12:10", "13:00"),
+    ("D", "13:10", "14:00"),
+    ("5", "14:10", "15:00"),
+    ("6", "15:10", "16:00"),
+    ("7", "16:10", "17:00"),
+    ("8", "17:10", "18:00"),
+    ("E", "18:10", "19:00"),
+    ("F", "19:10", "20:00"),
+    ("G", "20:10", "21:00"),
+    ("H", "21:10", "22:00"),
+)
+
+
+class DataError(ValueError):
+    """Raised when source data cannot be converted without losing meaning."""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--semester",
+        default="1151",
+        help="Four-digit NCCU semester code, for example 1151.",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=None,
+        help="Source CSV. Defaults to data/nccu_courses_<semester>.csv.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/nccuellmcourse.csv"),
+        help="Destination CSV.",
+    )
+    return parser.parse_args()
+
+
+def clean(value: object) -> str:
+    return str(value or "").strip()
+
+
+def normalize_credit(value: str) -> str:
+    raw = clean(value)
+    if not raw:
+        raise DataError("credit is empty")
+    try:
+        number = float(raw)
+    except ValueError as exc:
+        raise DataError(f"invalid credit: {raw!r}") from exc
+    if number < 0:
+        raise DataError(f"credit cannot be negative: {raw!r}")
+    return str(int(number)) if number.is_integer() else f"{number:g}"
+
+
+def parse_time(value: str) -> tuple[str, str]:
+    raw = re.sub(r"\s+", "", clean(value))
+    if raw in FLEXIBLE_TIMES:
+        return "0", ""
+
+    matches = re.findall(r"([一二三四五六日天])([0-9A-Za-z]+)", raw)
+    rebuilt = "".join(day + slots for day, slots in matches)
+    if not matches or rebuilt != raw:
+        raise DataError(f"unsupported class time: {value!r}")
+    if len(matches) != 1:
+        raise DataError(
+            f"multiple meeting days cannot fit the target columns: {value!r}"
+        )
+
+    day_text, slot_text = matches[0]
+    slots = list(slot_text.upper())
+    if len(slots) != len(set(slots)):
+        raise DataError(f"duplicate time slot: {value!r}")
+    return str(DAY_NUMBERS[day_text]), "|".join(slots)
+
+
+def normalize_clock(hour: str, minute: str) -> str:
+    return f"{int(hour):02d}:{minute}"
+
+
+def parse_summer_time_from_note(note: str) -> tuple[str, str] | None:
+    """Read the regular day/time shown in summer-course notes.
+
+    Summer courses have specific meeting dates, so the source schedule field is
+    commonly marked flexible even though the note includes a representative day
+    and one or more time ranges. The legacy CSV stores the first named weekday.
+    """
+
+    text = clean(note).split("上課日期", 1)[0]
+    day_match = re.search(r"週([一二三四五六日天])", text)
+    if not day_match:
+        return None
+
+    ranges = re.findall(
+        r"(\d{1,2}):(\d{2})\s*[-－–]\s*(\d{1,2}):(\d{2})",
+        text,
+    )
+    if not ranges:
+        return None
+
+    slots: list[str] = []
+    for start_hour, start_minute, end_hour, end_minute in ranges:
+        start = normalize_clock(start_hour, start_minute)
+        end = normalize_clock(end_hour, end_minute)
+        matched = [slot for slot, slot_start, slot_end in PERIODS if slot_start >= start and slot_end <= end]
+        if not matched:
+            raise DataError(f"summer note has an unsupported time range: {start}-{end}")
+        for slot in matched:
+            if slot not in slots:
+                slots.append(slot)
+
+    return str(DAY_NUMBERS[day_match.group(1)]), "|".join(slots)
+
+
+def is_base_course(row: dict[str, str]) -> bool:
+    department = clean(row["departmentCode"])
+    name = clean(row["subNam"])
+    if department == "961":
+        return name in ELLM_BASE_COURSES
+    if department == "652":
+        return clean(row["subKind"]) == "必修"
+    return False
+
+
+def is_language_course(row: dict[str, str]) -> bool:
+    name = clean(row["subNam"])
+    note = clean(row["note"])
+    return "語文課程" in note or any(pattern in name for pattern in LANGUAGE_NAME_PATTERNS)
+
+
+def bool_text(value: bool) -> str:
+    return "True" if value else "False"
+
+
+def load_source(path: Path, semester: str) -> list[dict[str, str]]:
+    if not re.fullmatch(r"\d{4}", semester):
+        raise DataError(f"semester must contain four digits: {semester!r}")
+    if not path.is_file():
+        raise DataError(f"source CSV does not exist: {path}")
+
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or [])
+        missing = sorted(REQUIRED_INPUT_FIELDS - fields)
+        if missing:
+            raise DataError(f"source CSV is missing columns: {', '.join(missing)}")
+        rows = list(reader)
+
+    selected = [
+        row
+        for row in rows
+        if clean(row["semester"]) == semester
+        and clean(row["departmentCode"]) in PROGRAMS
+    ]
+    if not selected:
+        raise DataError(f"no law-program courses found for semester {semester}")
+    return selected
+
+
+def convert(rows: list[dict[str, str]], semester: str) -> list[dict[str, str]]:
+    grouped: dict[str, list[dict[str, str]]] = {code: [] for code in PROGRAM_ORDER}
+    for row in rows:
+        grouped[clean(row["departmentCode"])].append(row)
+
+    output: list[dict[str, str]] = []
+    seen_course_numbers: set[str] = set()
+
+    for department in PROGRAM_ORDER:
+        config = PROGRAMS[department]
+        program_rows = sorted(
+            grouped[department],
+            key=lambda row: (
+                not clean(row["subNum"]).endswith("005"),
+                clean(row["subNum"]),
+            ) if department == "961" else (clean(row["subNum"]),),
+        )
+        if len(program_rows) > 99:
+            raise DataError(
+                f"{config['program']} has {len(program_rows)} courses; its ID range allows 99"
+            )
+
+        for offset, row in enumerate(program_rows):
+            course_number = clean(row["subNum"])
+            name = clean(row["subNam"])
+            teacher = clean(row["teaNam"])
+            if not course_number or not name:
+                raise DataError(f"course number or name is empty: {row!r}")
+            if course_number in seen_course_numbers:
+                raise DataError(f"duplicate CourseNumber: {course_number}")
+            seen_course_numbers.add(course_number)
+
+            try:
+                day, slots = parse_time(row["subTime"])
+                if day == "0" and course_number.endswith("005"):
+                    summer_time = parse_summer_time_from_note(row["note"])
+                    if summer_time:
+                        day, slots = summer_time
+                credit = normalize_credit(row["subPoint"])
+            except DataError as exc:
+                raise DataError(f"{course_number} {name}: {exc}") from exc
+
+            sequence = int(config["id_start"]) + offset
+            output.append(
+                {
+                    "id": f"{semester}{sequence:03d}",
+                    "name": name,
+                    "teacher": teacher,
+                    "day": day,
+                    "slots": slots,
+                    "credit": credit,
+                    "isBase": bool_text(is_base_course(row)),
+                    "isLang": bool_text(is_language_course(row)),
+                    "CourseNumber": course_number,
+                    "program": str(config["program"]),
+                    "isSmr": bool_text(course_number.endswith("005")),
+                }
+            )
+
+    return output
+
+
+def validate_output(rows: list[dict[str, str]], semester: str) -> None:
+    if not rows:
+        raise DataError("output is empty")
+    ids = [row["id"] for row in rows]
+    course_numbers = [row["CourseNumber"] for row in rows]
+    if len(ids) != len(set(ids)):
+        raise DataError("output contains duplicate IDs")
+    if len(course_numbers) != len(set(course_numbers)):
+        raise DataError("output contains duplicate CourseNumbers")
+    if any(not value.startswith(semester) for value in ids):
+        raise DataError("an output ID has the wrong semester prefix")
+    if any(set(row) != set(OUTPUT_FIELDS) for row in rows):
+        raise DataError("an output row has incorrect columns")
+
+
+def write_output(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, extrasaction="raise")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> int:
+    args = parse_args()
+    semester = clean(args.semester)
+    source = args.input or Path(f"data/nccu_courses_{semester}.csv")
+    rows = convert(load_source(source, semester), semester)
+    validate_output(rows, semester)
+    write_output(args.output, rows)
+
+    counts = Counter(row["program"] for row in rows)
+    print(f"Created {args.output} with {len(rows)} courses for {semester}.")
+    for program in ("法碩專班", "法律系碩士班", "法科所"):
+        print(f"- {program}: {counts[program]}")
+    print(f"- 基礎科目: {sum(row['isBase'] == 'True' for row in rows)}")
+    print(f"- 語文課程: {sum(row['isLang'] == 'True' for row in rows)}")
+    print(f"- 暑期課程: {sum(row['isSmr'] == 'True' for row in rows)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
