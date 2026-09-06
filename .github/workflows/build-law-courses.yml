@@ -2,21 +2,9 @@ name: 整理法學院課程 CSV
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows:
-      - 更新政大課程 CSV
-    types:
-      - completed
   schedule:
-    # 作為保險，每6小時在全校資料更新後再檢查一次。
-    - cron: "50 */6 * * *"
-  push:
-    branches:
-      - main
-    paths:
-      - "data/nccu_courses_1151.csv"
-      - "scripts/build_law_courses.py"
-      - ".github/workflows/build-law-courses.yml"
+    # 每月1日臺灣時間11:15執行（GitHub Actions使用UTC）。
+    - cron: "15 3 1 * *"
 
 permissions:
   contents: write
@@ -27,15 +15,11 @@ concurrency:
 
 jobs:
   build-law-courses:
-    if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     env:
       PYTHONUNBUFFERED: "1"
-      NCCU_SEMESTER: "1151"
 
     steps:
       - name: 取得最新課程資料
@@ -49,12 +33,49 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: 確認最新學期來源資料
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import os
+          import re
+          from pathlib import Path
+
+          candidates = []
+          for path in Path("data").glob("nccu_courses_*.csv"):
+              match = re.fullmatch(r"nccu_courses_(\d{4})\.csv", path.name)
+              if match:
+                  candidates.append((match.group(1), path))
+
+          if not candidates:
+              raise SystemExit("找不到目前學期課程資料")
+
+          semester, path = max(candidates, key=lambda item: int(item[0]))
+
+          with path.open("r", encoding="utf-8-sig", newline="") as handle:
+              rows = list(csv.DictReader(handle))
+
+          law_codes = {"961", "651", "652"}
+          current = [
+              row for row in rows
+              if row.get("semester", "").strip() == semester
+              and row.get("departmentCode", "").strip() in law_codes
+          ]
+          if not current:
+              raise SystemExit(f"{semester}資料中找不到法學院三個班別課程")
+
+          print(f"已確認最新學期{semester}法學院課程：{len(current)}門")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"LATEST_SEMESTER={semester}\n")
+          PY
+
       - name: 整理法學院三個班別
         shell: bash
         run: |
           python scripts/build_law_courses.py \
-            --semester "${NCCU_SEMESTER}" \
-            --input "data/nccu_courses_${NCCU_SEMESTER}.csv" \
+            --current-root "data" \
+            --history-root "data/history" \
             --output "data/nccuellmcourse.csv"
 
       - name: 執行程式測試
@@ -74,9 +95,21 @@ jobs:
               rows = list(csv.DictReader(handle))
 
           counts = Counter(row["program"] for row in rows)
+          semesters = sorted({row["id"][:4] for row in rows}, key=int)
+          current_rows = [
+              row for row in rows
+              if row["id"].startswith(os.environ["LATEST_SEMESTER"])
+          ]
+          if not current_rows:
+              raise SystemExit(
+                  f"整理後的CSV沒有{os.environ['LATEST_SEMESTER']}資料，停止提交"
+              )
+
           summary = [
               "## 法學院課程整理結果\n",
               f"- 全部課程：{len(rows)} 門",
+              f"- 涵蓋學期：{semesters[0]} 至 {semesters[-1]}，共 {len(semesters)} 學期",
+              f"- 最新學期：{os.environ['LATEST_SEMESTER']}，共{len(current_rows)}門（確認存在）",
               f"- 法碩專班：{counts['法碩專班']} 門",
               f"- 法律系碩士班：{counts['法律系碩士班']} 門",
               f"- 法科所：{counts['法科所']} 門",
@@ -99,6 +132,6 @@ jobs:
             exit 0
           fi
 
-          git commit -m "自動整理法學院115-1課程資料"
+          git commit -m "自動整理法學院歷史及目前課程資料"
           git pull --rebase origin main
           git push origin HEAD:main
