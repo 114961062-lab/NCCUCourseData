@@ -113,15 +113,10 @@ class DataError(ValueError):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--semester",
-        default="1151",
-        help="Four-digit NCCU semester code, for example 1151.",
-    )
-    parser.add_argument(
-        "--input",
+        "--current-root",
         type=Path,
-        default=None,
-        help="Current source CSV. Defaults to data/nccu_courses_<semester>.csv.",
+        default=Path("data"),
+        help="Folder containing current nccu_courses_<semester>.csv files.",
     )
     parser.add_argument(
         "--history-root",
@@ -320,8 +315,7 @@ def convert(rows: list[dict[str, str]], semester: str) -> list[dict[str, str]]:
 
 
 def discover_sources(
-    current_source: Path,
-    current_semester: str,
+    current_root: Path,
     history_root: Path,
 ) -> list[tuple[str, Path]]:
     sources: dict[str, Path] = {}
@@ -339,14 +333,23 @@ def discover_sources(
                 raise DataError(f"duplicate source semester {semester}: {path}")
             sources[semester] = path
 
-    if current_source.is_file():
-        if current_semester in sources:
-            raise DataError(
-                f"semester {current_semester} exists in both history and current data"
-            )
-        sources[current_semester] = current_source
-    else:
-        raise DataError(f"current source CSV does not exist: {current_source}")
+    if not current_root.is_dir():
+        raise DataError(f"current data folder does not exist: {current_root}")
+
+    current_count = 0
+    for path in sorted(current_root.glob("nccu_courses_*.csv")):
+        match = re.fullmatch(r"nccu_courses_(\d{4})\.csv", path.name)
+        if not match:
+            continue
+        semester = match.group(1)
+        # A current file takes precedence if the same semester was archived.
+        sources[semester] = path
+        current_count += 1
+
+    if current_count == 0:
+        raise DataError(
+            f"no current nccu_courses_<semester>.csv found in {current_root}"
+        )
 
     return sorted(sources.items(), key=lambda item: int(item[0]))
 
@@ -389,9 +392,13 @@ def write_output(path: Path, rows: list[dict[str, str]]) -> None:
 
 def main() -> int:
     args = parse_args()
-    semester = clean(args.semester)
-    current_source = args.input or Path(f"data/nccu_courses_{semester}.csv")
-    sources = discover_sources(current_source, semester, args.history_root)
+    sources = discover_sources(args.current_root, args.history_root)
+    latest_semester, latest_source = max(sources, key=lambda item: int(item[0]))
+    latest_rows = load_source(latest_source, latest_semester)
+    print(
+        f"Latest semester detected: {latest_semester} "
+        f"({len(latest_rows)} law-program courses)."
+    )
     print(f"Found {len(sources)} semesters; building one combined CSV.")
     rows = convert_sources(sources)
     validate_output(rows)
