@@ -706,6 +706,10 @@
           {
             "utCodL3": "0",
             "utL3Text": "----- 請選擇 Choose unit -----"
+          },
+          {
+            "utCodL3": "NU2",
+            "utL3Text": "校學士 / University Bachelor Program/B/0"
           }
         ]
       }
@@ -1974,6 +1978,10 @@
           {
             "utCodL3": "NU1",
             "utL3Text": "運動產業與文化學士學位學程 / Bachelor Program in Sport Industry and Culture"
+          },
+          {
+            "utCodL3": "NU2",
+            "utL3Text": "校學士 / University Bachelor Program/B/0"
           }
         ]
       },
