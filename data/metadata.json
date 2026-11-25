@@ -1,11 +1,9 @@
 {
-  "status": "partial_with_fallback",
+  "status": "ok",
   "semester": "1151",
-  "updatedAtUtc": "2026-11-24T22:43:18+00:00",
+  "updatedAtUtc": "2026-11-25T09:01:25+00:00",
   "courseCount": 2915,
   "unitCount": 279,
-  "failedUnits": {
-    "2S1": "2S1 中國語文類通識抓取失敗：HTTP Error 502: Bad Gateway"
-  },
+  "failedUnits": {},
   "source": "https://nccu-course-proxy.114961062.workers.dev"
 }
